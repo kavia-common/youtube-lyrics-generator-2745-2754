@@ -1,13 +1,33 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, List, Tuple
 import re
 import os
+import io
 
+# Primary lightweight backend
 try:
-    # PyPDF2 is a common, lightweight PDF library suitable for simple text extraction
     import PyPDF2  # type: ignore
 except Exception:  # pragma: no cover
     PyPDF2 = None  # type: ignore
+
+# Fallback backends for robustness against malformed files
+try:
+    import pdfplumber  # type: ignore
+except Exception:  # pragma: no cover
+    pdfplumber = None  # type: ignore
+
+try:
+    import fitz  # PyMuPDF
+except Exception:  # pragma: no cover
+    fitz = None  # type: ignore
+
+# OCR fallback for scanned/image-based PDFs
+try:
+    import pytesseract  # type: ignore
+    from PIL import Image  # type: ignore
+except Exception:  # pragma: no cover
+    pytesseract = None  # type: ignore
+    Image = None  # type: ignore
 
 
 @dataclass
@@ -24,16 +44,18 @@ class WatcherAgent:
     PUBLIC_INTERFACE
     Reads a local PDF file and extracts a description text.
 
-    Strategy:
-    1) Open the given PDF file path.
-    2) Extract text from the first few pages.
-    3) Heuristically identify the first major block or a 'description' field.
-       - Prefer a section headed by 'Description' (case-insensitive).
-       - Otherwise, use the first non-trivial paragraph as the description.
+    Strategy (robust, multi-backend):
+    1) Try PyPDF2 (fast, lightweight).
+    2) Fallback to pdfplumber (better layout handling and resilience).
+    3) Fallback to PyMuPDF/fitz (robust parser, handles malformed PDFs).
+    4) As a last resort, OCR pages using pytesseract (for scanned or severely malformed PDFs).
+
+    Then:
+    - Heuristically identify a 'Description' section or first non-trivial paragraph.
 
     Notes:
-    - This avoids external services and works locally.
-    - For more robust parsing (layouts, tables), consider integrating pdfminer.six.
+    - OCR requires Tesseract installed on the system. If unavailable, we provide
+      actionable instructions in the error details.
     """
 
     # PUBLIC_INTERFACE
@@ -62,45 +84,154 @@ class WatcherAgent:
                 details=f"Provided path: {path}"
             )
 
-        if PyPDF2 is None:
-            return WatcherResult(
-                success=False,
-                error="PyPDF2 is not installed.",
-                details="Install PyPDF2 in your environment to enable PDF text extraction."
-            )
+        texts: List[Tuple[str, str]] = []  # [(source, text)]
+        errors: List[str] = []
 
-        try:
-            text = self._extract_text_with_pypdf2(path)
-        except Exception as e:
-            return WatcherResult(
-                success=False,
-                error="Failed to extract text from PDF.",
-                details=str(e)
-            )
+        # 1) PyPDF2
+        if PyPDF2 is not None:
+            try:
+                texts.append(("PyPDF2", self._extract_text_with_pypdf2(path)))
+            except Exception as e:
+                errors.append(f"PyPDF2 failed: {e}")
+
+        # 2) pdfplumber
+        if pdfplumber is not None:
+            try:
+                texts.append(("pdfplumber", self._extract_text_with_pdfplumber(path)))
+            except Exception as e:
+                errors.append(f"pdfplumber failed: {e}")
+        else:
+            errors.append("pdfplumber not installed.")
+
+        # 3) PyMuPDF/fitz
+        if fitz is not None:
+            try:
+                texts.append(("PyMuPDF", self._extract_text_with_pymupdf(path)))
+            except Exception as e:
+                errors.append(f"PyMuPDF failed: {e}")
+        else:
+            errors.append("PyMuPDF (fitz) not installed.")
+
+        # 4) OCR fallback (only if we still have no text or very short text)
+        best_text = self._pick_best_text([t for _, t in texts])
+        used_backend = None
+        if best_text:
+            # Find which backend produced non-empty text
+            for backend, t in texts:
+                if t and t.strip():
+                    used_backend = backend
+                    break
+        if not best_text or len(best_text.strip()) < 40:
+            if pytesseract is not None and fitz is not None:
+                try:
+                    ocr_text = self._extract_text_with_ocr(path, max_pages=3)
+                    if ocr_text and len(ocr_text.strip()) > len(best_text or ""):
+                        best_text = ocr_text
+                        used_backend = "OCR(pytesseract)+PyMuPDF"
+                except Exception as e:
+                    errors.append(f"OCR fallback failed: {e}")
+            else:
+                if pytesseract is None:
+                    errors.append("OCR not available: pytesseract not installed.")
+                if fitz is None:
+                    errors.append("OCR requires PyMuPDF (fitz) to rasterize pages to images.")
+
+        text = self._normalize_whitespace(best_text or "")
 
         description = self._find_description_block(text)
         if not description:
+            # Provide richer error feedback and guidance.
+            guidance = self._build_guidance_message(errors)
             return WatcherResult(
                 success=False,
                 error="No suitable description text found in the PDF.",
-                details="Ensure the PDF contains readable text (not images only)."
+                details=guidance
             )
 
-        return WatcherResult(success=True, description=description)
+        # If we got a description, but the backend used is useful to mention for diagnostics
+        backend_note = f"Extracted via: {used_backend}" if used_backend else "Extracted via: Unknown backend"
+        final_desc = description
+        return WatcherResult(success=True, description=final_desc, details=backend_note)
 
     def _extract_text_with_pypdf2(self, path: str) -> str:
-        # Read the first few pages to find a description; limit to avoid heavy processing.
-        chunks = []
+        chunks: List[str] = []
         with open(path, "rb") as f:
             reader = PyPDF2.PdfReader(f)  # type: ignore
-            num_pages = min(len(reader.pages), 5)  # read at most first 5 pages
+            num_pages = min(len(reader.pages), 5)
             for i in range(num_pages):
                 page = reader.pages[i]
-                # extract_text can be None; handle gracefully
                 page_text = page.extract_text() or ""
                 chunks.append(page_text)
-        raw = "\n".join(chunks)
-        # Normalize whitespace
+        return self._normalize_whitespace("\n".join(chunks))
+
+    def _extract_text_with_pdfplumber(self, path: str) -> str:
+        chunks: List[str] = []
+        with pdfplumber.open(path) as pdf:  # type: ignore
+            num_pages = min(len(pdf.pages), 5)
+            for i in range(num_pages):
+                page = pdf.pages[i]
+                page_text = page.extract_text() or ""
+                chunks.append(page_text)
+        return self._normalize_whitespace("\n".join(chunks))
+
+    def _extract_text_with_pymupdf(self, path: str) -> str:
+        chunks: List[str] = []
+        doc = fitz.open(path)  # type: ignore
+        try:
+            num_pages = min(doc.page_count, 5)
+            for i in range(num_pages):
+                page = doc.load_page(i)
+                # Use text extraction method that balances reliability
+                page_text = page.get_text("text") or ""  # "text" often yields linearized text
+                chunks.append(page_text)
+        finally:
+            doc.close()
+        return self._normalize_whitespace("\n".join(chunks))
+
+    def _extract_text_with_ocr(self, path: str, max_pages: int = 3) -> str:
+        """
+        Render first N pages to images and run OCR.
+        Requires: fitz (PyMuPDF) for rendering and pytesseract + Tesseract binary.
+        """
+        if pytesseract is None or fitz is None:
+            return ""
+
+        # OCR hint: User might need to install Tesseract system binary.
+        # This code will raise if tesseract is not on PATH.
+        texts: List[str] = []
+        doc = fitz.open(path)  # type: ignore
+        try:
+            pages = min(doc.page_count, max_pages)
+            for i in range(pages):
+                page = doc.load_page(i)
+                # Render at 2x scale for better OCR quality
+                mat = fitz.Matrix(2, 2)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                img_bytes = pix.tobytes("png")
+                if Image is None:
+                    continue
+                image = Image.open(io.BytesIO(img_bytes))
+                ocr_text = pytesseract.image_to_string(image)  # type: ignore
+                if ocr_text:
+                    texts.append(ocr_text)
+        finally:
+            doc.close()
+
+        return self._normalize_whitespace("\n".join(texts))
+
+    def _pick_best_text(self, candidates: List[str]) -> str:
+        """
+        Pick the 'best' text by length (simple heuristic); prefers longer content.
+        """
+        best = ""
+        for c in candidates:
+            if c and len(c.strip()) > len(best.strip()):
+                best = c
+        return best
+
+    def _normalize_whitespace(self, raw: str) -> str:
+        if not raw:
+            return ""
         raw = re.sub(r"\r", "\n", raw)
         raw = re.sub(r"[ \t]+", " ", raw)
         raw = re.sub(r"\n{3,}", "\n\n", raw)
@@ -113,36 +244,28 @@ class WatcherAgent:
         if not text:
             return ""
 
-        # 1) Look for a 'Description' heading and capture its following paragraph(s)
-        #    We capture up to the next heading-like line or a blank line block.
         lines = [l.strip() for l in text.split("\n")]
         for idx, line in enumerate(lines):
             if re.match(r"^\s*description\s*[:\-]?\s*$", line, flags=re.IGNORECASE):
-                block = []
+                block: List[str] = []
                 for j in range(idx + 1, len(lines)):
                     if self._looks_like_heading(lines[j]):
                         break
                     block.append(lines[j])
-                candidate = self._normalize_paragraphs(block)
-                candidate = candidate.strip()
+                candidate = self._normalize_paragraphs(block).strip()
                 if candidate:
-                    # Limit length to a reasonable size to fit in image
                     return candidate[:1200].strip()
 
-        # 2) Fallback: take the first non-trivial paragraph
         paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
         for p in paragraphs:
-            # ignore boilerplate like headers or very short lines
             if len(p) >= 40:
                 return p[:1200].strip()
 
-        # 3) Last resort: return the first 300 chars of the raw text
         return text[:300].strip()
 
     def _looks_like_heading(self, line: str) -> bool:
         if not line:
             return False
-        # Heuristics: lines that are short and Title Case or all caps often are headings.
         if len(line) <= 4:
             return True
         if line.isupper() and len(line) <= 60:
@@ -151,9 +274,9 @@ class WatcherAgent:
             return True
         return False
 
-    def _normalize_paragraphs(self, lines: list[str]) -> str:
-        buf = []
-        cur = []
+    def _normalize_paragraphs(self, lines: List[str]) -> str:
+        buf: List[str] = []
+        cur: List[str] = []
         for l in lines:
             if not l:
                 if cur:
@@ -163,5 +286,25 @@ class WatcherAgent:
             cur.append(l)
         if cur:
             buf.append(" ".join(cur))
-        # Join paragraphs with a blank line
         return "\n\n".join(buf)
+
+    def _build_guidance_message(self, errors: List[str]) -> str:
+        """
+        Build an actionable details message enumerating attempted backends and how to fix common issues.
+        """
+        hints = [
+            "- Ensure the PDF contains selectable text. If it's scanned, OCR is required.",
+            "- If OCR failed, install the Tesseract binary and language data:",
+            "  • Ubuntu/Debian: sudo apt-get update && sudo apt-get install -y tesseract-ocr",
+            "  • macOS (Homebrew): brew install tesseract",
+            "  • Windows: Install from https://github.com/tesseract-ocr/tesseract and ensure it is on PATH",
+            "- Re-run after installing system dependencies and Python packages.",
+        ]
+        attempted = "\n".join(f"* {e}" for e in errors) if errors else "* No errors captured (empty text)."
+        return (
+            "Tried multiple extraction backends but could not obtain a suitable description.\n\n"
+            "Attempted backends and errors:\n"
+            f"{attempted}\n\n"
+            "How to proceed:\n"
+            + "\n".join(hints)
+        )

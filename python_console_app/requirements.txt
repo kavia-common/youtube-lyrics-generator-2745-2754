@@ -22,3 +22,8 @@ yt-dlp==2025.1.26
 # New dependencies for PDF reading and image creation
 PyPDF2==3.0.1
 Pillow==10.4.0
+# Robust PDF extraction fallbacks
+pdfplumber==0.11.4
+PyMuPDF==1.24.9
+# OCR (optional; requires tesseract system binary)
+pytesseract==0.3.13
