@@ -1,6 +1,10 @@
 from datetime import datetime
 import os
+import dotenv 
 
+dotenv.load_dotenv()
+
+print('[DEBUG] OPENAI_API_KEY:', os.getenv('OPENAI_API_KEY'))
 from django.core.management.base import BaseCommand
 
 from api.agents.watcher_agent import WatcherAgent
