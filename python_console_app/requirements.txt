@@ -29,3 +29,6 @@ PyMuPDF==1.24.9
 pytesseract==0.3.13
 # Network download
 requests==2.32.3
+# Optional clients for AI image generation (Replicate + OpenAI). These are optional at runtime.
+openai>=1.50.0
+replicate>=0.32.0

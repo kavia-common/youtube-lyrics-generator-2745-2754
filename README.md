@@ -3,7 +3,9 @@
 This console app has been repurposed to:
 - Download a PDF from a user-provided URL.
 - Extract a description from the PDF (WatcherAgent).
-- Generate an image using that description (LyricistAgent) and save it to `generated_image.png`.
+- Generate a real image using that description (LyricistAgent) and save it to `generated_image.png`.
+  • Uses Replicate (Stable Diffusion/SDXL) if REPLICATE_API_TOKEN is set, or OpenAI Images if OPENAI_API_KEY is set.
+  • Gracefully falls back to a local Pillow-based text rendering if no API is configured or reachable.
 
 Run:
 - pip install -r python_console_app/requirements.txt
@@ -20,6 +22,24 @@ Error handling:
 - If the URL is invalid/unsupported scheme, the network times out, or the server returns an error code, the command prints clear messages and aborts.
 - If the downloaded file is not a valid PDF (checked via header `%PDF-`), the command removes the temp file and reports the error.
 - Permission or I/O errors while writing the temp file or output image are handled with messages.
+
+## Real image generation configuration
+
+You can enable AI image generation by setting environment variables before running the command:
+
+- Replicate (Stable Diffusion/SDXL):
+  export REPLICATE_API_TOKEN="your_token_here"
+  # Optional overrides:
+  export REPLICATE_MODEL="stability-ai/sdxl"
+  export IMAGE_SIZE="1024x1024"
+
+- OpenAI (DALL·E / Images API):
+  export OPENAI_API_KEY="your_key_here"
+  # Optional overrides:
+  export OPENAI_IMAGE_MODEL="gpt-image-1"   # or "dall-e-3"
+  export IMAGE_SIZE="1024x1024"
+
+If neither is set, the app will fall back to an offline placeholder image using Pillow. This ensures the workflow remains functional without external services.
 
 ## PDF extraction robustness
 
