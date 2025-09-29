@@ -52,6 +52,7 @@ class Command(BaseCommand):
                 error(f"Reason: {wres.error}")
             if wres.details:
                 info(f"Details: {wres.details}")
+            info("Hint: If your URL includes playlist params like 'list=' or '&start_radio=1', the tool now normalizes it automatically, but cookies may still be required for restricted videos.")
             self._set_return_code(1)
             return
 
