@@ -5,6 +5,9 @@ Ocean Professional theme:
 - Primary (blue): #2563EB
 - Secondary/success (amber): #F59E0B
 - Error (red): #EF4444
+
+Notes:
+- prompt() prints the message in primary and returns raw input string.
 """
 
 from dataclasses import dataclass

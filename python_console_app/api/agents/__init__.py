@@ -1,7 +1,7 @@
 """
 Agents package initialization.
 
-Contains:
-- WatcherAgent: fetches or transcribes YouTube audio to transcript.
-- LyricistAgent: converts transcript into structured song-like lyrics.
+Updated roles:
+- WatcherAgent: reads a local PDF and extracts a description text.
+- LyricistAgent: generates an image from the extracted description (placeholder renderer with Pillow).
 """

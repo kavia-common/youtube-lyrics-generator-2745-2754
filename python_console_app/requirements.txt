@@ -15,6 +15,10 @@ PyYAML==6.0.2
 sqlparse==0.5.3
 uritemplate==4.1.1
 django-cors-headers==4.7.0
+# Legacy deps retained but no longer used by default flow:
 youtube-transcript-api==0.6.2
 pytube==15.0.0
 yt-dlp==2025.1.26
+# New dependencies for PDF reading and image creation
+PyPDF2==3.0.1
+Pillow==10.4.0

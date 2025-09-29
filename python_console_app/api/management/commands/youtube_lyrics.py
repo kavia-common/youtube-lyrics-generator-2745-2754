@@ -6,20 +6,20 @@ from api.agents.lyricist_agent import LyricistAgent
 from api.utils.console import info, success, error, headline, prompt
 
 
-OUTPUT_FILE = "lyrics_output.txt"
+IMAGE_OUTPUT_FILE = "generated_image.png"
 
 
 class Command(BaseCommand):
     """
     PUBLIC_INTERFACE
-    Django management command: youtube_lyrics
+    Django management command: youtube_lyrics (repurposed for PDF → image)
 
     Purpose:
         Provides a console (stdin/stdout) interface to:
-          - Prompt for a YouTube URL.
-          - Attempt to retrieve/transcribe the video into a transcript (WatcherAgent).
-          - Generate structured song-like lyrics from the transcript (LyricistAgent).
-          - Save lyrics to 'lyrics_output.txt' and preview in console.
+          - Prompt for a local PDF file path.
+          - Read the PDF and extract a description text (WatcherAgent).
+          - Generate an image visualizing that description (LyricistAgent).
+          - Save image to 'generated_image.png' and confirm in console.
 
     Usage:
         python manage.py youtube_lyrics
@@ -28,66 +28,67 @@ class Command(BaseCommand):
         Exits with status code 0 on success; 1 on failure.
     """
 
-    help = "Generate song-like lyrics from a YouTube video's spoken content."
+    help = "Generate an image from a description extracted from a local PDF."
 
     def handle(self, *args, **options):
-        headline("YouTube Lyrics Generator · Ocean Professional")
-        info("This tool will convert spoken content from a YouTube video into stylized lyrics.")
+        headline("PDF Description → Image · Ocean Professional")
+        info("This tool reads a local PDF, extracts a description, and renders an image based on it.")
 
-        url = prompt("Enter a YouTube video URL:")
-        if not url or not url.strip():
-            error("No URL provided. Aborting.")
+        pdf_path = prompt("Enter a local PDF file path:")
+        if not pdf_path or not pdf_path.strip():
+            error("No PDF path provided. Aborting.")
             self._set_return_code(1)
             return
 
-        style = prompt("Select a lyrics style [pop | hiphop | rock | ballad | country | electronic] (default: pop):")
-        style = style.strip().lower() or "pop"
-
-        info("Processing video, attempting to retrieve transcript...")
+        info("Reading PDF and extracting description...")
         watcher = WatcherAgent()
-        wres = watcher.get_transcript(url)
-        if not wres.success or not wres.transcript:
-            error("Failed to retrieve transcript.")
+        wres = watcher.get_description_from_pdf(pdf_path)
+        if not wres.success or not wres.description:
+            error("Failed to extract description from PDF.")
             if wres.error:
                 error(f"Reason: {wres.error}")
             if wres.details:
                 info(f"Details: {wres.details}")
-            info("Hint: If your URL includes playlist params like 'list=' or '&start_radio=1', the tool now normalizes it automatically, but cookies may still be required for restricted videos.")
             self._set_return_code(1)
             return
 
-        info("Generating lyrics...")
+        info("Generating image from description...")
         lyricist = LyricistAgent()
-        lres = lyricist.generate_lyrics(transcript=wres.transcript, style=style)
-        if not lres.success or not lres.lyrics:
-            error("Failed to generate lyrics.")
-            if lres.error:
-                error(f"Reason: {lres.error}")
-            if lres.details:
-                info(f"Details: {lres.details}")
+        ires = lyricist.generate_image_from_description(description=wres.description, output_path=IMAGE_OUTPUT_FILE)
+        if not ires.success or not ires.image_path:
+            error("Failed to generate image.")
+            if ires.error:
+                error(f"Reason: {ires.error}")
+            if ires.details:
+                info(f"Details: {ires.details}")
             self._set_return_code(1)
             return
 
-        # Save to file
+        # Save confirmation
         try:
-            self._write_output(lres.lyrics)
+            self._write_manifest(wres.description, ires.image_path)
         except Exception as e:
-            error(f"Unable to write output file: {e}")
+            error(f"Unable to write manifest: {e}")
             self._set_return_code(1)
             return
 
-        success(f"Lyrics generated successfully and saved to '{OUTPUT_FILE}'.")
-        headline("Preview")
-        print()
-        print(lres.lyrics[:2000])  # Preview first 2000 chars
-        print()
+        success(f"Image generated successfully and saved to '{ires.image_path}'.")
         info("Done.")
         self._set_return_code(0)
 
-    def _write_output(self, lyrics: str) -> None:
+    def _write_manifest(self, description: str, image_path: str) -> None:
+        """
+        Write a small manifest file capturing when and from what description the image was produced.
+        """
         timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
-        content = f"# YouTube Lyrics\n# Generated: {timestamp}\n\n{lyrics}\n"
-        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        content = (
+            "# PDF → Image Manifest\n"
+            f"# Generated: {timestamp}\n"
+            f"# Image: {image_path}\n\n"
+            "## Description Used\n\n"
+            f"{description}\n"
+        )
+        with open("generated_image_manifest.txt", "w", encoding="utf-8") as f:
             f.write(content)
 
     def _set_return_code(self, code: int):

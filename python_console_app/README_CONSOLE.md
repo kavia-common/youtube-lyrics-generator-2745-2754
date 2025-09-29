@@ -1,4 +1,4 @@
-# YouTube Lyrics Generator (Console)
+# PDF Description → Image Generator (Console)
 
 Run the console app:
 
@@ -12,11 +12,11 @@ Run the console app:
    python manage.py youtube_lyrics
 
 Flow:
-- Enter a YouTube URL when prompted.
-- Choose a style (pop | hiphop | rock | ballad | country | electronic).
-- The tool tries to fetch the official transcript using youtube-transcript-api.
-- If no transcript is available, it attempts to download audio (pytube) and will inform you that speech-to-text is not configured.
-- On success, lyrics are generated and saved to 'lyrics_output.txt' and previewed in the console.
+- Enter a local PDF file path when prompted.
+- The tool reads the PDF and extracts a description (first 'Description' section or the first substantial paragraph).
+- An image is generated using a placeholder renderer (Pillow) with the description text.
+- The image is saved to 'generated_image.png'. A 'generated_image_manifest.txt' summarizing the inputs is also written.
 
 Notes:
-- For real audio transcription when transcripts are unavailable, integrate an STT service (e.g., OpenAI Whisper or Vosk) inside WatcherAgent._try_download_audio path and add necessary environment variables to your deployment. This project intentionally avoids hard-coding secrets or third-party API calls.
+- This implementation avoids any external API calls and works fully offline.
+- To integrate a real image generation model, replace LyricistAgent._render_placeholder with an API call and ensure proper environment variables are provided. Do not hard-code secrets.

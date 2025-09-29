@@ -1,12 +1,21 @@
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional, Tuple
+import textwrap
+import os
+
+try:
+    from PIL import Image, ImageDraw, ImageFont  # type: ignore
+except Exception:  # pragma: no cover
+    Image = None  # type: ignore
+    ImageDraw = None  # type: ignore
+    ImageFont = None  # type: ignore
 
 
 @dataclass
-class LyricsResult:
-    """Holds the result of generating lyrics from a transcript."""
+class ImageResult:
+    """Holds the result of generating an image from a description."""
     success: bool
-    lyrics: Optional[str] = None
+    image_path: Optional[str] = None
     error: Optional[str] = None
     details: Optional[str] = None
 
@@ -14,178 +23,104 @@ class LyricsResult:
 class LyricistAgent:
     """
     PUBLIC_INTERFACE
-    Generates structured song-like lyrics from a given transcript.
+    Generates an image from a given description.
 
-    This implementation is self-contained and heuristic-based to avoid external dependencies.
-    It splits transcript text into thematic stanzas and formats them as:
-      - Intro (optional)
-      - Verse 1
-      - Chorus
-      - Verse 2
-      - Bridge (optional)
-      - Chorus (repeat)
-      - Outro (optional)
+    Default implementation uses Pillow to render a placeholder image with the
+    description text. This avoids external API calls and works offline.
 
-    Supports style hints like: "pop", "hiphop", "rock", "ballad", "country", "electronic".
+    To integrate with an image generation API (e.g., Stable Diffusion, OpenAI, etc.),
+    replace _render_placeholder with an API call and file saving logic.
     """
 
-    SUPPORTED_STYLES: List[str] = ["pop", "hiphop", "rock", "ballad", "country", "electronic"]
+    DEFAULT_SIZE: Tuple[int, int] = (1024, 1024)
+    DEFAULT_BG = (249, 250, 251)     # #f9fafb
+    DEFAULT_FG = (17, 24, 39)        # #111827 (text)
+    ACCENT = (37, 99, 235)           # #2563EB
 
     # PUBLIC_INTERFACE
-    def generate_lyrics(self, transcript: str, style: str = "pop") -> LyricsResult:
+    def generate_image_from_description(self, description: str, output_path: str = "generated_image.png") -> ImageResult:
         """
-        Convert transcript text into stylized, structured lyrics.
+        Generate an image visualizing the provided description.
 
         Parameters:
-            transcript: The input spoken content.
-            style: A style hint influencing word choice and stanza structure.
+            description: The textual description to visualize.
+            output_path: Where to save the resulting image (PNG).
 
         Returns:
-            LyricsResult containing success and lyrics, or error details.
+            ImageResult containing success flag and image path (or error details).
         """
-        if not transcript or not transcript.strip():
-            return LyricsResult(success=False, error="Transcript is empty.", details="Provide a non-empty transcript.")
+        if not description or not description.strip():
+            return ImageResult(success=False, error="Description is empty.", details="Provide a non-empty description.")
 
-        style = style.lower().strip()
-        if style not in self.SUPPORTED_STYLES:
-            style = "pop"  # fallback
+        # Ensure PIL (Pillow) is available
+        if Image is None or ImageDraw is None or ImageFont is None:
+            return ImageResult(
+                success=False,
+                error="Pillow is not installed.",
+                details="Install pillow in your environment to enable image rendering."
+            )
 
-        # Tokenize into phrases/sentences
-        base_lines = self._to_lines(transcript)
+        try:
+            self._render_placeholder(description.strip(), output_path)
+        except Exception as e:
+            return ImageResult(success=False, error="Failed to generate image.", details=str(e))
 
-        # Derive key motif from transcript
-        motif = self._derive_motif(base_lines)
+        if not os.path.exists(output_path):
+            return ImageResult(success=False, error="Image file not created.", details=f"Tried: {output_path}")
 
-        # Build sections
-        verse1 = self._verse_from(base_lines[:8], style, motif, verse_number=1)
-        chorus = self._chorus_from(motif, style)
-        verse2 = self._verse_from(base_lines[8:16], style, motif, verse_number=2)
-        bridge = self._bridge_from(base_lines[16:22], style, motif)
+        return ImageResult(success=True, image_path=output_path)
 
-        # Compose full lyrics
-        sections = []
-        sections.append(self._header("Verse 1"))
-        sections.extend(verse1)
-        sections.append("")
-        sections.append(self._header("Chorus"))
-        sections.extend(chorus)
-        sections.append("")
-        sections.append(self._header("Verse 2"))
-        sections.extend(verse2)
-        if bridge:
-            sections.append("")
-            sections.append(self._header("Bridge"))
-            sections.extend(bridge)
-        sections.append("")
-        sections.append(self._header("Chorus"))
-        sections.extend(chorus)
+    def _render_placeholder(self, text: str, output_path: str) -> None:
+        """
+        Create a simple poster-like image with the text centered, wrapped nicely.
+        """
+        W, H = self.DEFAULT_SIZE
+        img = Image.new("RGB", (W, H), self.DEFAULT_BG)
+        draw = ImageDraw.Draw(img)
 
-        lyrics_text = "\n".join(sections).strip()
-        return LyricsResult(success=True, lyrics=lyrics_text)
+        # Accent border
+        border = 20
+        for i in range(0, 6):
+            draw.rectangle([border - i, border - i, W - border + i, H - border + i], outline=self.ACCENT, width=1)
 
-    def _to_lines(self, transcript: str) -> List[str]:
-        # Gentle sentence splitting
-        raw = transcript.replace("\n", " ")
-        chunks = [c.strip() for c in self._split_sentences(raw) if c.strip()]
-        # Normalize line length
-        lines = []
-        for c in chunks:
-            if len(c) <= 70:
-                lines.append(c)
-            else:
-                # Break long sentences into ~70 char segments
-                words = c.split()
-                buf = []
-                cur = 0
-                for w in words:
-                    if cur + len(w) + 1 > 70 and buf:
-                        lines.append(" ".join(buf))
-                        buf = [w]
-                        cur = len(w)
-                    else:
-                        buf.append(w)
-                        cur += len(w) + 1
-                if buf:
-                    lines.append(" ".join(buf))
-        return lines or ["We wander through the echoes, searching for a sign."]
+        # Try to load a decent font; fallback to default
+        font = None
+        for candidate in ["DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]:
+            try:
+                font = ImageFont.truetype(candidate, 36)
+                break
+            except Exception:
+                continue
+        if font is None:
+            font = ImageFont.load_default()
 
-    def _split_sentences(self, text: str) -> List[str]:
-        # Very simple sentence split
-        import re
-        parts = re.split(r"(?<=[\.\!\?])\s+", text)
-        return parts
+        # Title
+        title = "Generated Image"
+        title_font = None
+        try:
+            title_font = ImageFont.truetype("DejaVuSans.ttf", 48)
+        except Exception:
+            title_font = font
 
-    def _derive_motif(self, lines: List[str]) -> str:
-        # Take a few meaningful words from the earliest lines to become the chorus hook
-        import re
-        words = []
-        for line in lines[:6]:
-            for token in re.findall(r"[A-Za-z']+", line):
-                t = token.lower()
-                if len(t) > 3 and t not in ("this", "that", "with", "have", "from", "your", "their", "about"):
-                    words.append(t)
-        if not words:
-            return "Hold on, let the daylight find our way"
-        # Build a short motif phrase
-        chosen = words[:5]
-        phrase = " ".join(chosen).strip().title()
-        return phrase if phrase else "Hold on, let the daylight find our way"
+        title_w, title_h = draw.textbbox((0, 0), title, font=title_font)[2:]
+        draw.text(((W - title_w) / 2, 60), title, font=title_font, fill=self.ACCENT)
 
-    def _verse_from(self, lines: List[str], style: str, motif: str, verse_number: int) -> List[str]:
-        flavor_prefix = self._style_prefix(style)
-        return [
-            f"{flavor_prefix}{line}" for line in (lines or [f"In the {style} rhythm, we tell the tale {verse_number}."])
-        ][:8]
+        # Wrap description
+        max_width_chars = 40
+        wrapped = textwrap.fill(text, width=max_width_chars)
+        # Measure and draw paragraph centered horizontally
+        y = 130
+        line_spacing = 8
+        for para in wrapped.split("\n"):
+            bbox = draw.textbbox((0, 0), para, font=font)
+            line_w, line_h = bbox[2], bbox[3]
+            x = (W - line_w) / 2
+            draw.text((x, y), para, font=font, fill=self.DEFAULT_FG)
+            y += line_h + line_spacing
 
-    def _chorus_from(self, motif: str, style: str) -> List[str]:
-        hook = self._style_hook(style)
-        return [
-            f"{hook} {motif}",
-            f"{hook} We sing it loud, we sing it true",
-            f"{hook} {motif}",
-            f"{hook} Let the night turn into blue",
-        ]
+        # Signature/footer
+        footer = "Ocean Professional"
+        fw, fh = draw.textbbox((0, 0), footer, font=font)[2:]
+        draw.text((W - fw - 20, H - fh - 20), footer, font=font, fill=self.ACCENT)
 
-    def _bridge_from(self, lines: List[str], style: str, motif: str) -> List[str]:
-        if not lines:
-            return []
-        mood = self._style_bridge_mood(style)
-        bridge_lines = [f"{mood}{l}" for l in lines[:4]]
-        bridge_lines.append(f"{mood}{motif.lower()} fades then rises new")
-        return bridge_lines
-
-    def _header(self, title: str) -> str:
-        return f"[{title}]"
-
-    def _style_prefix(self, style: str) -> str:
-        mapping = {
-            "pop": "",
-            "hiphop": "",
-            "rock": "",
-            "ballad": "",
-            "country": "",
-            "electronic": "",
-        }
-        return mapping.get(style, "")
-
-    def _style_hook(self, style: str) -> str:
-        hooks = {
-            "pop": "Oh",
-            "hiphop": "Yeah",
-            "rock": "Hey",
-            "ballad": "Ooh",
-            "country": "Whoa",
-            "electronic": "Ah",
-        }
-        return hooks.get(style, "Oh")
-
-    def _style_bridge_mood(self, style: str) -> str:
-        moods = {
-            "pop": "",
-            "hiphop": "",
-            "rock": "",
-            "ballad": "",
-            "country": "",
-            "electronic": "",
-        }
-        return moods.get(style, "")
+        img.save(output_path, format="PNG")
