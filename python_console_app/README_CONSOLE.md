@@ -12,13 +12,19 @@ Run the console app:
    python manage.py youtube_lyrics
 
 Flow:
-- Enter a local PDF file path when prompted.
-- The tool reads the PDF and extracts a description (first 'Description' section or the first substantial paragraph).
+- Enter a PDF URL (http/https) when prompted.
+- The tool downloads the PDF to a temporary file and extracts a description (first 'Description' section or the first substantial paragraph).
 - An image is generated using a placeholder renderer (Pillow) with the description text.
-- The image is saved to 'generated_image.png'. A 'generated_image_manifest.txt' summarizing the inputs is also written.
+- The image is saved to 'generated_image.png'. A 'generated_image_manifest.txt' summarizing the inputs (including source URL) is also written.
+- The temporary file is deleted at the end of the command, even on most error paths.
+
+Networking & validation:
+- Downloads use requests with timeouts and SSL verification.
+- The downloader checks for a PDF header signature (%PDF-) and handles non-200 responses.
+- Clear error messages are shown for invalid URLs, permission errors, and network failures.
 
 Robust PDF extraction:
-- The tool now tries multiple backends to extract text:
+- The tool tries multiple backends to extract text:
   1) PyPDF2
   2) pdfplumber
   3) PyMuPDF (fitz)

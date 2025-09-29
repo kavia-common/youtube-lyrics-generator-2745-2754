@@ -42,7 +42,7 @@ class WatcherResult:
 class WatcherAgent:
     """
     PUBLIC_INTERFACE
-    Reads a local PDF file and extracts a description text.
+    Reads a PDF file and extracts a description text.
 
     Strategy (robust, multi-backend):
     1) Try PyPDF2 (fast, lightweight).
@@ -56,6 +56,7 @@ class WatcherAgent:
     Notes:
     - OCR requires Tesseract installed on the system. If unavailable, we provide
       actionable instructions in the error details.
+    - This agent operates on a local file path. For URLs, download to a temp file first.
     """
 
     # PUBLIC_INTERFACE
