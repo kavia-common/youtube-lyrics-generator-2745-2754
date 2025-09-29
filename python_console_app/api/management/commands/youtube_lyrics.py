@@ -94,7 +94,15 @@ class Command(BaseCommand):
                 self._set_return_code(1)
                 return
 
-            success(f"Image generated successfully and saved to '{ires.image_path}'.")
+            # Explicitly inform whether this was an AI-generated image or local fallback
+            if ires.details and "Rendered locally (fallback placeholder)" in ires.details:
+                success(f"Image saved to '{ires.image_path}' (LOCAL PLACEHOLDER).")
+                info(f"Generator details: {ires.details}")
+            else:
+                success(f"Image saved to '{ires.image_path}' (AI GENERATED).")
+                info(f"Generator details: {ires.details or 'No extra details'}")
+            # Also show the first part of the prompt used
+            info(f"Prompt used (snippet): {(wres.description or '')[:120]}...")
             info("Done.")
             self._set_return_code(0)
         finally:

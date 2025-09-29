@@ -3,6 +3,8 @@ from typing import Optional, Tuple
 import textwrap
 import os
 import base64
+import json
+import traceback
 
 # Optional external APIs (lazy import in methods)
 try:
@@ -74,26 +76,36 @@ class LyricistAgent:
 
         # Attempt external AI generation as requested
         api_errors = []
+        # Track which providers were attempted and the prompt used, for clear diagnostics
+        attempted = []
+
         if replicate_token:
+            attempted.append("Replicate")
             try:
                 self._generate_with_replicate(description, output_path)
-                if os.path.exists(output_path):
-                    return ImageResult(success=True, image_path=output_path, details="Generated via Replicate")
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    return ImageResult(success=True, image_path=output_path, details=f"Generated via Replicate | prompt snippet: {description[:80]}")
+                else:
+                    raise RuntimeError("Replicate returned no image bytes or file is empty.")
             except Exception as e:
-                api_errors.append(f"Replicate failed: {e}")
+                api_errors.append(f"Replicate failed: {e}\n{traceback.format_exc(limit=1)}")
 
         if openai_key:
+            attempted.append("OpenAI")
             try:
-                self._generate_with_openai(description, output_path)
-                if os.path.exists(output_path):
-                    return ImageResult(success=True, image_path=output_path, details="Generated via OpenAI")
+                provider_detail = self._generate_with_openai(description, output_path)
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    # provider_detail indicates whether b64 or url was used and which model
+                    return ImageResult(success=True, image_path=output_path, details=f"Generated via OpenAI ({provider_detail}) | prompt snippet: {description[:80]}")
+                else:
+                    raise RuntimeError("OpenAI returned no image bytes or file is empty.")
             except Exception as e:
-                api_errors.append(f"OpenAI failed: {e}")
+                api_errors.append(f"OpenAI failed: {e}\n{traceback.format_exc(limit=1)}")
 
         # Fallback to Pillow rendering if APIs are not configured or failed
         if Image is None or ImageDraw is None or ImageFont is None:
             # Even fallback needs Pillow; if missing, return error with setup instructions
-            details = " | ".join(api_errors) if api_errors else "No API keys configured."
+            details = f"Attempted: {', '.join(attempted) or 'none'} | " + (" | ".join(api_errors) if api_errors else "No API keys configured.")
             return ImageResult(
                 success=False,
                 error="No image generated. Pillow not installed and external APIs unavailable/failed.",
@@ -103,15 +115,16 @@ class LyricistAgent:
         try:
             self._render_placeholder(description, output_path)
         except Exception as e:
-            details = " | ".join(api_errors) if api_errors else "No API keys configured."
+            details = f"Attempted: {', '.join(attempted) or 'none'} | " + (" | ".join(api_errors) if api_errors else "No API keys configured.")
             return ImageResult(success=False, error="Failed to generate image (fallback).", details=f"{details} | {e}")
 
         if not os.path.exists(output_path):
-            details = " | ".join(api_errors) if api_errors else "No API keys configured."
+            details = f"Attempted: {', '.join(attempted) or 'none'} | " + (" | ".join(api_errors) if api_errors else "No API keys configured.")
             return ImageResult(success=False, error="Image file not created.", details=f"{details} Tried: {output_path}")
 
-        suffix = " (fallback placeholder)" if api_errors or (not replicate_token and not openai_key) else ""
-        return ImageResult(success=True, image_path=output_path, details=f"Rendered locally{suffix}")
+        suffix = " (fallback placeholder)"
+        # Explicitly indicate fallback usage in details so user can distinguish
+        return ImageResult(success=True, image_path=output_path, details=f"Rendered locally{suffix} | prompt snippet: {description[:80]}")
 
     # --- External integrations ---
 
@@ -120,46 +133,35 @@ class LyricistAgent:
         Generate an image using Replicate. Requires REPLICATE_API_TOKEN.
         Optional env: REPLICATE_MODEL (defaults to a common SDXL model).
         """
-        import json
         import time
-
-        # Lazy import to avoid hard dependency if not used
         import requests
 
         token = os.getenv("REPLICATE_API_TOKEN", "").strip()
         if not token:
             raise RuntimeError("REPLICATE_API_TOKEN not set")
 
-        # Default model: stability-ai/sdxl (public popular Stable Diffusion XL runner on Replicate)
-        # Users can override via REPLICATE_MODEL to pick another model/version.
         model = os.getenv("REPLICATE_MODEL", "stability-ai/sdxl")
-        # Replicate API format: POST /v1/predictions with {"version": <model_version or model slug>, "input": {...}}
-        # For simplicity, use model directly; Replicate also supports owner/model:version hash.
-        # Many hosted models accept "prompt" and return an array of image URLs in "output".
         api_url = "https://api.replicate.com/v1/predictions"
         headers = {
             "Authorization": f"Token {token}",
             "Content-Type": "application/json",
         }
 
-        # Input arguments vary by model; SDXL types typically support prompt and aspect ratio/size.
         payload = {
             "version": model,
             "input": {
                 "prompt": prompt,
-                # Some models support additional params; keep minimal for compatibility.
-                # For certain models, you may pass size like "image_dimensions": os.getenv("IMAGE_SIZE", "1024x1024")
             }
         }
 
-        resp = requests.post(api_url, headers=headers, data=json.dumps(payload), timeout=60)
+        resp = requests.post(api_url, headers=headers, json=payload, timeout=60)
         if resp.status_code not in (200, 201):
             raise RuntimeError(f"Replicate API create prediction failed: {resp.status_code} {resp.text}")
 
         prediction = resp.json()
         get_url = prediction.get("urls", {}).get("get")
         if not get_url:
-            raise RuntimeError(f"Unexpected Replicate response: {prediction}")
+            raise RuntimeError(f"Unexpected Replicate response (no polling URL): {json.dumps(prediction)}")
 
         # Poll until completed
         for _ in range(60):
@@ -170,16 +172,14 @@ class LyricistAgent:
             status = pdata.get("status")
             if status in ("succeeded", "failed", "canceled"):
                 if status != "succeeded":
-                    raise RuntimeError(f"Replicate prediction status: {status} details={pdata}")
+                    raise RuntimeError(f"Replicate prediction status: {status} details={json.dumps(pdata)}")
                 output = pdata.get("output")
-                # Expect output to be a list of URLs; download the first
                 if not output:
-                    raise RuntimeError(f"Replicate returned no output: {pdata}")
+                    raise RuntimeError(f"Replicate returned no output: {json.dumps(pdata)}")
                 first_url = output[0] if isinstance(output, list) else output
-                # Download image
                 img_resp = requests.get(first_url, timeout=60)
                 if img_resp.status_code != 200:
-                    raise RuntimeError(f"Failed to download image from Replicate URL: {img_resp.status_code}")
+                    raise RuntimeError(f"Failed to download image from Replicate URL: {img_resp.status_code} {img_resp.text[:200]}")
                 with open(output_path, "wb") as f:
                     f.write(img_resp.content)
                 return
@@ -187,77 +187,110 @@ class LyricistAgent:
 
         raise RuntimeError("Replicate prediction timed out")
 
-    def _generate_with_openai(self, prompt: str, output_path: str) -> None:
+    def _generate_with_openai(self, prompt: str, output_path: str) -> str:
         """
         Generate an image using OpenAI Images API. Requires OPENAI_API_KEY.
-        Tries gpt-image-1 / dall-e-3 depending on available client.
-        """
-        import json
+        Supports new SDK (openai>=1.*) and legacy import fallback.
 
+        Returns:
+            A detail string indicating transport (b64/url) and model used on success.
+        """
         api_key = os.getenv("OPENAI_API_KEY", "").strip()
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY not set")
 
-        # Two possibilities depending on openai package version; keep flexible
+        # Try new SDK first
         try:
-            # Newer OpenAI Python SDK (client = OpenAI())
             from openai import OpenAI  # type: ignore
             client = OpenAI(api_key=api_key)
             model = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
             size = os.getenv("IMAGE_SIZE", "1024x1024")
+
+            # Validate size format for clarity
+            if "x" not in size:
+                size = "1024x1024"
+
             result = client.images.generate(
                 model=model,
                 prompt=prompt,
                 size=size,
                 n=1,
             )
-            # In newer SDK, b64 data is often at result.data[0].b64_json or URL
             data0 = result.data[0]
-            if hasattr(data0, "b64_json") and data0.b64_json:
-                b64 = data0.b64_json
-                img_bytes = base64.b64decode(b64)
+
+            if getattr(data0, "b64_json", None):
+                img_bytes = base64.b64decode(data0.b64_json)
                 with open(output_path, "wb") as f:
                     f.write(img_bytes)
-                return
-            if hasattr(data0, "url") and data0.url:
+                return f"b64_json; model={model}; size={size}"
+
+            if getattr(data0, "url", None):
                 import requests
                 img_resp = requests.get(data0.url, timeout=60)
                 if img_resp.status_code != 200:
-                    raise RuntimeError(f"Failed to download image from OpenAI URL: {img_resp.status_code}")
+                    raise RuntimeError(f"Failed to download image from OpenAI URL: {img_resp.status_code} {img_resp.text[:200]}")
                 with open(output_path, "wb") as f:
                     f.write(img_resp.content)
-                return
-            raise RuntimeError(f"OpenAI Images returned unexpected payload: {json.dumps(result.model_dump() if hasattr(result, 'model_dump') else result)}")
+                return f"url; model={model}; size={size}"
+
+            # If neither field is present, include raw-ish structure for debugging
+            try:
+                raw_dump = result.model_dump()
+            except Exception:
+                raw_dump = str(result)
+            raise RuntimeError(f"OpenAI Images returned unexpected payload: {raw_dump}")
+
         except Exception as e_new:
-            # Fallback to legacy openai lib if present
+            # Legacy fallback: old import style
             try:
                 import openai  # type: ignore
                 openai.api_key = api_key
                 model = os.getenv("OPENAI_IMAGE_MODEL", "dall-e-3")
                 size = os.getenv("IMAGE_SIZE", "1024x1024")
-                result = openai.images.generate(
-                    model=model,
-                    prompt=prompt,
-                    size=size,
-                    n=1,
-                )
-                data0 = result["data"][0]
+                if "x" not in size:
+                    size = "1024x1024"
+
+                # In some older SDKs, the call is openai.Image.create; in newer legacy, it's openai.images.generate
+                detail = ""
+                try:
+                    # Preferred legacy method per >=1.x compatibility layer
+                    result = openai.images.generate(
+                        model=model,
+                        prompt=prompt,
+                        size=size,
+                        n=1,
+                    )
+                    data0 = result["data"][0]
+                    detail = "images.generate"
+                except Exception:
+                    # Older fallback method
+                    result = openai.Image.create(
+                        prompt=prompt,
+                        n=1,
+                        size=size,
+                    )
+                    data0 = result["data"][0]
+                    detail = "Image.create"
+
                 if "b64_json" in data0 and data0["b64_json"]:
                     img_bytes = base64.b64decode(data0["b64_json"])
                     with open(output_path, "wb") as f:
                         f.write(img_bytes)
-                    return
+                    return f"b64_json; model={model}; size={size}; via={detail}"
+
                 if "url" in data0 and data0["url"]:
                     import requests
                     img_resp = requests.get(data0["url"], timeout=60)
                     if img_resp.status_code != 200:
-                        raise RuntimeError(f"Failed to download image from OpenAI URL: {img_resp.status_code}")
+                        raise RuntimeError(f"Failed to download image from OpenAI URL: {img_resp.status_code} {img_resp.text[:200]}")
                     with open(output_path, "wb") as f:
                         f.write(img_resp.content)
-                    return
-                raise RuntimeError(f"OpenAI Images returned unexpected payload: {result}")
+                    return f"url; model={model}; size={size}; via={detail}"
+
+                raise RuntimeError(f"OpenAI Images (legacy) returned unexpected payload: {json.dumps(result)}")
+
             except Exception as e_legacy:
-                raise RuntimeError(f"OpenAI generation failed: {e_new} | legacy attempt: {e_legacy}")
+                raise RuntimeError(f"OpenAI generation failed (new SDK): {e_new} | legacy attempt: {e_legacy}")
 
     # --- Local placeholder rendering ---
 
@@ -266,6 +299,9 @@ class LyricistAgent:
         Create a simple poster-like image with the text centered, wrapped nicely.
         """
         W, H = self.DEFAULT_SIZE
+        if Image is None:
+            raise RuntimeError("Pillow not installed for fallback rendering.")
+
         img = Image.new("RGB", (W, H), self.DEFAULT_BG)
         draw = ImageDraw.Draw(img)
 
@@ -287,7 +323,6 @@ class LyricistAgent:
 
         # Title
         title = "Generated Image (Placeholder)"
-        title_font = None
         try:
             title_font = ImageFont.truetype("DejaVuSans.ttf", 48)
         except Exception:
