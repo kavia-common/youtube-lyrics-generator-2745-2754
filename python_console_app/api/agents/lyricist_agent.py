@@ -5,6 +5,7 @@ import os
 import base64
 import json
 import traceback
+import time
 
 # Optional external APIs (lazy import in methods)
 try:
@@ -65,65 +66,87 @@ class LyricistAgent:
         Returns:
             ImageResult containing success flag and image path (or error details).
         """
+        print("[LyricistAgent] generate_image_from_description called")
         if not description or not description.strip():
+            print("[LyricistAgent] Provided description is empty - aborting.")
             return ImageResult(success=False, error="Description is empty.", details="Provide a non-empty description.")
 
         description = description.strip()
 
-        # Try Replicate first if available
-        replicate_token = os.getenv("REPLICATE_API_TOKEN", "").strip()
-        openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+        # Read env early and log their state (mask secrets)
+        replicate_token = os.getenv("REPLICATE_API_TOKEN", "")
+        openai_key = os.getenv("OPENAI_API_KEY", "")
+        print(f"[LyricistAgent] Env check: REPLICATE_API_TOKEN set? {'yes' if bool(replicate_token) else 'no'}")
+        print(f"[LyricistAgent] Env check: OPENAI_API_KEY value: {os.getenv('OPENAI_API_KEY')} (note: printed for diagnostics as requested)")
 
         # Attempt external AI generation as requested
         api_errors = []
-        # Track which providers were attempted and the prompt used, for clear diagnostics
         attempted = []
 
-        if replicate_token:
+        # Try Replicate first if available
+        if (replicate_token or "").strip():
             attempted.append("Replicate")
+            print("[LyricistAgent] Attempting Replicate image generation...")
             try:
+                start = time.time()
                 self._generate_with_replicate(description, output_path)
+                elapsed = time.time() - start
+                print(f"[LyricistAgent] Replicate call completed in {elapsed:.2f}s")
                 if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                     return ImageResult(success=True, image_path=output_path, details=f"Generated via Replicate | prompt snippet: {description[:80]}")
                 else:
                     raise RuntimeError("Replicate returned no image bytes or file is empty.")
             except Exception as e:
-                api_errors.append(f"Replicate failed: {e}\n{traceback.format_exc(limit=1)}")
+                tb = traceback.format_exc()
+                print(f"[LyricistAgent] Replicate error: {e}\n{tb}")
+                api_errors.append(f"Replicate failed: {e}\n{tb}")
+        else:
+            print("[LyricistAgent] Skipping Replicate: REPLICATE_API_TOKEN not set.")
 
-        if openai_key:
+        # Then try OpenAI if available
+        if (openai_key or "").strip():
             attempted.append("OpenAI")
+            print("[LyricistAgent] Attempting OpenAI Images generation...")
             try:
+                start = time.time()
                 provider_detail = self._generate_with_openai(description, output_path)
+                elapsed = time.time() - start
+                print(f"[LyricistAgent] OpenAI call completed in {elapsed:.2f}s. Detail: {provider_detail}")
                 if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                    # provider_detail indicates whether b64 or url was used and which model
                     return ImageResult(success=True, image_path=output_path, details=f"Generated via OpenAI ({provider_detail}) | prompt snippet: {description[:80]}")
                 else:
                     raise RuntimeError("OpenAI returned no image bytes or file is empty.")
             except Exception as e:
-                api_errors.append(f"OpenAI failed: {e}\n{traceback.format_exc(limit=1)}")
+                tb = traceback.format_exc()
+                print(f"[LyricistAgent] OpenAI error: {e}\n{tb}")
+                api_errors.append(f"OpenAI failed: {e}\n{tb}")
+        else:
+            print("[LyricistAgent] Skipping OpenAI: OPENAI_API_KEY not set or empty.")
 
         # Fallback to Pillow rendering if APIs are not configured or failed
         if Image is None or ImageDraw is None or ImageFont is None:
-            # Even fallback needs Pillow; if missing, return error with setup instructions
             details = f"Attempted: {', '.join(attempted) or 'none'} | " + (" | ".join(api_errors) if api_errors else "No API keys configured.")
+            print("[LyricistAgent] Falling back failed: Pillow not available.")
             return ImageResult(
                 success=False,
                 error="No image generated. Pillow not installed and external APIs unavailable/failed.",
                 details=details + " Install Pillow or set REPLICATE_API_TOKEN / OPENAI_API_KEY in environment."
             )
 
+        print("[LyricistAgent] Using local Pillow fallback renderer (no external API succeeded).")
         try:
             self._render_placeholder(description, output_path)
         except Exception as e:
             details = f"Attempted: {', '.join(attempted) or 'none'} | " + (" | ".join(api_errors) if api_errors else "No API keys configured.")
+            print(f"[LyricistAgent] Local fallback rendering failed: {e}")
             return ImageResult(success=False, error="Failed to generate image (fallback).", details=f"{details} | {e}")
 
         if not os.path.exists(output_path):
             details = f"Attempted: {', '.join(attempted) or 'none'} | " + (" | ".join(api_errors) if api_errors else "No API keys configured.")
+            print(f"[LyricistAgent] Expected output file missing after fallback: {output_path}")
             return ImageResult(success=False, error="Image file not created.", details=f"{details} Tried: {output_path}")
 
         suffix = " (fallback placeholder)"
-        # Explicitly indicate fallback usage in details so user can distinguish
         return ImageResult(success=True, image_path=output_path, details=f"Rendered locally{suffix} | prompt snippet: {description[:80]}")
 
     # --- External integrations ---
@@ -133,7 +156,6 @@ class LyricistAgent:
         Generate an image using Replicate. Requires REPLICATE_API_TOKEN.
         Optional env: REPLICATE_MODEL (defaults to a common SDXL model).
         """
-        import time
         import requests
 
         token = os.getenv("REPLICATE_API_TOKEN", "").strip()
@@ -154,7 +176,13 @@ class LyricistAgent:
             }
         }
 
-        resp = requests.post(api_url, headers=headers, json=payload, timeout=60)
+        try:
+            resp = requests.post(api_url, headers=headers, json=payload, timeout=60)
+        except requests.exceptions.Timeout as te:
+            raise RuntimeError(f"Replicate API timeout on create: {te}")
+        except requests.exceptions.RequestException as re:
+            raise RuntimeError(f"Replicate API network error on create: {re}")
+
         if resp.status_code not in (200, 201):
             raise RuntimeError(f"Replicate API create prediction failed: {resp.status_code} {resp.text}")
 
@@ -165,19 +193,32 @@ class LyricistAgent:
 
         # Poll until completed
         for _ in range(60):
-            pr = requests.get(get_url, headers=headers, timeout=30)
+            try:
+                pr = requests.get(get_url, headers=headers, timeout=30)
+            except requests.exceptions.Timeout as te:
+                raise RuntimeError(f"Replicate polling timeout: {te}")
+            except requests.exceptions.RequestException as re:
+                raise RuntimeError(f"Replicate polling network error: {re}")
+
             if pr.status_code != 200:
                 raise RuntimeError(f"Replicate polling failed: {pr.status_code} {pr.text}")
             pdata = pr.json()
             status = pdata.get("status")
             if status in ("succeeded", "failed", "canceled"):
                 if status != "succeeded":
-                    raise RuntimeError(f"Replicate prediction status: {status} details={json.dumps(pdata)}")
+                    # Include error fields like logs or error if present
+                    err_msg = pdata.get("error") or pdata.get("logs") or json.dumps(pdata)
+                    raise RuntimeError(f"Replicate prediction status: {status} details={err_msg}")
                 output = pdata.get("output")
                 if not output:
                     raise RuntimeError(f"Replicate returned no output: {json.dumps(pdata)}")
                 first_url = output[0] if isinstance(output, list) else output
-                img_resp = requests.get(first_url, timeout=60)
+                try:
+                    img_resp = requests.get(first_url, timeout=60)
+                except requests.exceptions.Timeout as te:
+                    raise RuntimeError(f"Downloading Replicate image timed out: {te}")
+                except requests.exceptions.RequestException as re:
+                    raise RuntimeError(f"Downloading Replicate image network error: {re}")
                 if img_resp.status_code != 200:
                     raise RuntimeError(f"Failed to download image from Replicate URL: {img_resp.status_code} {img_resp.text[:200]}")
                 with open(output_path, "wb") as f:
@@ -206,16 +247,27 @@ class LyricistAgent:
             model = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-1")
             size = os.getenv("IMAGE_SIZE", "1024x1024")
 
-            # Validate size format for clarity
             if "x" not in size:
                 size = "1024x1024"
 
-            result = client.images.generate(
-                model=model,
-                prompt=prompt,
-                size=size,
-                n=1,
-            )
+            try:
+                result = client.images.generate(
+                    model=model,
+                    prompt=prompt,
+                    size=size,
+                    n=1,
+                )
+            except Exception as call_err:
+                # Attempt to classify known issues (quota, permissions)
+                err_text = str(call_err)
+                if "rate_limit" in err_text.lower() or "quota" in err_text.lower():
+                    raise RuntimeError(f"OpenAI quota/rate limit error: {err_text}")
+                if "insufficient_quota" in err_text.lower():
+                    raise RuntimeError(f"OpenAI insufficient quota: {err_text}")
+                if "authentication" in err_text.lower() or "invalid_api_key" in err_text.lower():
+                    raise RuntimeError(f"OpenAI authentication error: {err_text}")
+                raise
+
             data0 = result.data[0]
 
             if getattr(data0, "b64_json", None):
@@ -226,14 +278,18 @@ class LyricistAgent:
 
             if getattr(data0, "url", None):
                 import requests
-                img_resp = requests.get(data0.url, timeout=60)
+                try:
+                    img_resp = requests.get(data0.url, timeout=60)
+                except requests.exceptions.Timeout as te:
+                    raise RuntimeError(f"OpenAI image download timed out: {te}")
+                except requests.exceptions.RequestException as re:
+                    raise RuntimeError(f"OpenAI image download network error: {re}")
                 if img_resp.status_code != 200:
                     raise RuntimeError(f"Failed to download image from OpenAI URL: {img_resp.status_code} {img_resp.text[:200]}")
                 with open(output_path, "wb") as f:
                     f.write(img_resp.content)
                 return f"url; model={model}; size={size}"
 
-            # If neither field is present, include raw-ish structure for debugging
             try:
                 raw_dump = result.model_dump()
             except Exception:
@@ -250,37 +306,51 @@ class LyricistAgent:
                 if "x" not in size:
                     size = "1024x1024"
 
-                # In some older SDKs, the call is openai.Image.create; in newer legacy, it's openai.images.generate
                 detail = ""
                 try:
-                    # Preferred legacy method per >=1.x compatibility layer
                     result = openai.images.generate(
                         model=model,
                         prompt=prompt,
                         size=size,
                         n=1,
                     )
-                    data0 = result["data"][0]
+                    # Support both dict-like and object-like payloads
+                    data = result["data"] if isinstance(result, dict) else getattr(result, "data", [])
+                    data0 = data[0]
                     detail = "images.generate"
                 except Exception:
-                    # Older fallback method
-                    result = openai.Image.create(
-                        prompt=prompt,
-                        n=1,
-                        size=size,
-                    )
-                    data0 = result["data"][0]
-                    detail = "Image.create"
+                    try:
+                        result = openai.Image.create(
+                            prompt=prompt,
+                            n=1,
+                            size=size,
+                        )
+                        data0 = result["data"][0]
+                        detail = "Image.create"
+                    except Exception as call_err:
+                        err_text = str(call_err)
+                        if "rate_limit" in err_text.lower() or "quota" in err_text.lower():
+                            raise RuntimeError(f"OpenAI quota/rate limit error (legacy): {err_text}")
+                        if "insufficient_quota" in err_text.lower():
+                            raise RuntimeError(f"OpenAI insufficient quota (legacy): {err_text}")
+                        if "authentication" in err_text.lower() or "invalid_api_key" in err_text.lower():
+                            raise RuntimeError(f"OpenAI authentication error (legacy): {err_text}")
+                        raise
 
-                if "b64_json" in data0 and data0["b64_json"]:
+                if ("b64_json" in data0 and data0["b64_json"]):
                     img_bytes = base64.b64decode(data0["b64_json"])
                     with open(output_path, "wb") as f:
                         f.write(img_bytes)
                     return f"b64_json; model={model}; size={size}; via={detail}"
 
-                if "url" in data0 and data0["url"]:
+                if ("url" in data0 and data0["url"]):
                     import requests
-                    img_resp = requests.get(data0["url"], timeout=60)
+                    try:
+                        img_resp = requests.get(data0["url"], timeout=60)
+                    except requests.exceptions.Timeout as te:
+                        raise RuntimeError(f"OpenAI image download timed out (legacy): {te}")
+                    except requests.exceptions.RequestException as re:
+                        raise RuntimeError(f"OpenAI image download network error (legacy): {re}")
                     if img_resp.status_code != 200:
                         raise RuntimeError(f"Failed to download image from OpenAI URL: {img_resp.status_code} {img_resp.text[:200]}")
                     with open(output_path, "wb") as f:

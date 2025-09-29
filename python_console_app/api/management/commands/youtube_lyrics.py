@@ -78,6 +78,9 @@ class Command(BaseCommand):
                     error(f"Reason: {ires.error}")
                 if ires.details:
                     info(f"Details: {ires.details}")
+                # Explicit environment echo to aid diagnostics
+                info(f"Env OPENAI_API_KEY detected: {'yes' if (os.getenv('OPENAI_API_KEY') or '').strip() else 'no'}")
+                info(f"Env REPLICATE_API_TOKEN detected: {'yes' if (os.getenv('REPLICATE_API_TOKEN') or '').strip() else 'no'}")
                 self._set_return_code(1)
                 return
 
@@ -95,7 +98,7 @@ class Command(BaseCommand):
                 return
 
             # Explicitly inform whether this was an AI-generated image or local fallback
-            if ires.details and "Rendered locally (fallback placeholder)" in ires.details:
+            if ires.details and "Rendered locally" in ires.details:
                 success(f"Image saved to '{ires.image_path}' (LOCAL PLACEHOLDER).")
                 info(f"Generator details: {ires.details}")
             else:
